@@ -1,0 +1,407 @@
+"""
+SyncoMind - 企业级多 Agent 智能协作平台
+整合: 自动化合规审计 | 产品需求拆解 & 排期 | 竞品动态监控 & 策略生成
+"""
+import json
+from typing import TypedDict, List, Literal, Optional
+from enum import Enum
+from datetime import datetime
+
+# 使用 LangGraph 构建多 Agent 编排
+from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+# ============================
+# 全局状态定义 (跨三个业务域)
+# ============================
+class TaskType(str, Enum):
+    COMPLIANCE = "compliance"
+    REQUIREMENT = "requirement"
+    COMPETITOR = "competitor"
+
+class GlobalState(TypedDict):
+    # 任务标识
+    task_type: TaskType
+    trigger_source: str              # e.g., "定时调度", "PRD上传", "竞品异动"
+    
+    # 各域共享数据
+    knowledge_graph: dict            # 企业知识图谱 (云资源, 团队, 竞品等)
+    event_stream: List[dict]         # 统一事件流
+    
+    # 合规审计域
+    compliance_findings: List[dict]
+    compliance_report: str
+    compliance_score: float
+    
+    # 需求拆解域
+    prd_raw: str                     # 原始PRD文本
+    requirements_wbs: List[dict]     # 拆解后的WBS
+    schedule_plan: dict              # 排期计划 {task_id: estimated_days}
+    risk_notes: List[str]            # 风险注入说明
+    
+    # 竞品监控域
+    competitor_events: List[dict]
+    competitor_insights: dict        # 深度推理后的洞察
+    strategic_options: List[str]     # 策略建议
+    
+    # 跨域协同标记
+    cross_domain_actions: List[dict] # 动作：如"在迭代中插入安全任务"
+    
+    # 控制字段
+    current_stage: str
+    error_message: str
+
+# ============================
+# 模拟外部系统接口
+# ============================
+class MockCloudAPI:
+    @staticmethod
+    def get_iam_users():
+        return [{"name": "alice", "policies": ["AdministratorAccess"], "mfa": False, "last_used": "2025-12-01"}]
+    @staticmethod
+    def get_s3_buckets():
+        return [{"name": "prod-finance-bucket", "public": True, "encrypted": False}]
+    @staticmethod
+    def get_security_groups():
+        return [{"id": "sg-123", "rules": [{"port": 22, "cidr": "0.0.0.0/0"}]}]
+
+class MockJiraAPI:
+    @staticmethod
+    def get_team_capacity():
+        return {"backend": 3, "frontend": 2, "qa": 2}
+    @staticmethod
+    def get_issue_history(module: str):
+        return {"bug_rate": 0.1}
+
+class MockCompetitorAPI:
+    @staticmethod
+    def fetch_rivals_info():
+        return [{"name": "RivalX", "latest_news": "降价30%", "app_store_rating": 3.5, "hiring": "高级AI工程师"}]
+    @staticmethod
+    def fetch_social_sentiment(rival: str):
+        return "用户抱怨其新版本性能下降明显"
+
+# ============================
+# LLM 调用封装 (模拟)
+# ============================
+class LLMService:
+    @staticmethod
+    def invoke(prompt: str, system_prompt: str = "") -> str:
+        """实际应调用 Claude/GPT 等大模型，这里返回模拟结果"""
+        # 为了展示推理链，我们根据提示词内容返回有意义的JSON或文本
+        if "最小权限" in prompt:
+            return json.dumps({
+                "risk": "中",
+                "reasoning": "用户alice 90天未使用Admin权限，且当前部门职责不涉及基础设施管理",
+                "suggestion": "降级为ReadOnly角色，并在30天后回收"
+            })
+        elif "WBS拆解" in prompt:
+            return json.dumps({
+                "tasks": [
+                    {"id": "T1", "title": "支付服务接口开发", "role": "backend", "estimate": 3},
+                    {"id": "T2", "title": "收银台UI重构", "role": "frontend", "estimate": 5}
+                ],
+                "ambiguities": ["是否支持分期付款?"],
+                "risk": "第三方支付网关对接可能延迟"
+            })
+        elif "竞品战略" in prompt:
+            return json.dumps({
+                "strategic_moves": ["跟进降价", "强化性能优势", "加速AI功能上线"],
+                "urgency": "高"
+            })
+        return "{}"
+
+# ============================
+# 长链推理辅助函数
+# ============================
+def deep_compliance_reasoning(finding: dict, knowledge: dict) -> dict:
+    """
+    合规长链推理:
+    1. 获取资源关联的用户/部门信息
+    2. 分析历史操作日志 (模拟)
+    3. 结合公司政策进行多步因果推理
+    4. 输出风险等级与修复建议
+    """
+    user = finding.get("resource")
+    llm_input = f"""
+    你是一名云安全专家。针对用户 {user} 的权限配置进行深度分析。
+    当前发现: {json.dumps(finding, ensure_ascii=False)}
+    公司政策要求所有用户遵循最小权限，且闲置权限超过90天应自动回收。
+    已知该用户最后活跃时间: {knowledge.get('last_active', '未知')}
+    请逐步推理:
+    1. 其当前权限是否与其所属部门职责匹配?
+    2. 是否存在过度授权或闲置权限?
+    3. 综合给出风险等级(高/中/低)及具体修复步骤。
+    """
+    result = LLMService.invoke(llm_input)
+    return json.loads(result) if isinstance(result, str) else result
+
+def demand_deep_ambiguity_clarification(ambiguity: str, prd_context: str) -> dict:
+    """需求模糊点的多步澄清链"""
+    llm_input = f"""
+    上下文: {prd_context}
+    检测到的模糊表述: {ambiguity}
+    请执行:
+    1. 搜索知识库中相似历史需求，推测可能含义
+    2. 列出需要向产品经理确认的具体问题
+    3. 提供至少两种技术实现路径，并评估各自影响
+    """
+    return json.loads(LLMService.invoke(llm_input))
+
+def competitor_strategy_reasoning(event: dict, knowledge: dict) -> dict:
+    """竞品动态的深度推理链"""
+    llm_input = f"""
+    竞品事件: {json.dumps(event, ensure_ascii=False)}
+    我方产品路线图: {knowledge.get('our_roadmap', [])}
+    请串联分析:
+    1. 结合对方近期融资/招聘推断其战略重心
+    2. 评估该事件对我方的影响程度
+    3. 生成三种不同策略选项 (跟进/差异化/忽略)
+    """
+    return json.loads(LLMService.invoke(llm_input))
+
+# ============================
+# 各域 Agent 节点定义
+# ============================
+
+# ----- 合规审计子图 -----
+def compliance_data_collector(state: GlobalState) -> GlobalState:
+    print("[Compliance Agent] 收集云资源快照...")
+    state["event_stream"].append({"source": "cloud_api", "data": MockCloudAPI.get_iam_users()})
+    state["event_stream"].append({"source": "cloud_api", "data": MockCloudAPI.get_s3_buckets()})
+    return state
+
+def compliance_rule_scanner(state: GlobalState) -> GlobalState:
+    print("[Compliance Agent] 执行确定性规则扫描...")
+    findings = []
+    # S3公开桶
+    for bucket in MockCloudAPI.get_s3_buckets():
+        if bucket["public"]:
+            findings.append({"resource": bucket["name"], "issue": "S3桶公开访问", "severity": "高", "type": "deterministic"})
+    # IAM用户MFA
+    for user in MockCloudAPI.get_iam_users():
+        if not user["mfa"]:
+            findings.append({"resource": user["name"], "issue": "未启用MFA", "severity": "高", "type": "deterministic"})
+        # 模糊策略：管理员权限
+        if "AdministratorAccess" in user["policies"]:
+            findings.append({
+                "resource": user["name"],
+                "issue": "持有完整管理员权限",
+                "severity": "待评估",
+                "type": "fuzzy",
+                "last_active": user.get("last_used")
+            })
+    state["compliance_findings"] = findings
+    return state
+
+def compliance_deep_reasoner(state: GlobalState) -> GlobalState:
+    print("[Compliance Agent] 启动长链推理分析模糊策略...")
+    clarified = []
+    for f in state["compliance_findings"]:
+        if f.get("type") == "fuzzy":
+            # 注入更多上下文
+            extra = {"last_active": f.get("last_active", "未知"), "dept": "工程部"}
+            result = deep_compliance_reasoning(f, extra)
+            f["severity"] = result.get("risk", "中")
+            f["suggestion"] = result.get("suggestion", "")
+            f["reasoning_chain"] = result.get("reasoning", "")
+            clarified.append(f)
+        else:
+            clarified.append(f)
+    state["compliance_findings"] = clarified
+    return state
+
+def compliance_evaluator_and_reporter(state: GlobalState) -> GlobalState:
+    print("[Compliance Agent] 生成审计报告...")
+    high = sum(1 for f in state["compliance_findings"] if f["severity"] == "高")
+    score = max(0, 100 - high * 15)
+    state["compliance_score"] = score
+    state["compliance_report"] = json.dumps(state["compliance_findings"], ensure_ascii=False, indent=2)
+    return state
+
+def compliance_auto_remediator(state: GlobalState) -> GlobalState:
+    print("[Compliance Agent] 执行可自动修复的项目...")
+    for f in state["compliance_findings"]:
+        if f["issue"] == "S3桶公开访问" and f["severity"] == "高":
+            # 模拟关闭公共访问
+            f["status"] = "已自动修复 (设置BlockPublicAccess)"
+            state["cross_domain_actions"].append({
+                "action": "create_security_task",
+                "source": "compliance",
+                "detail": f"安全加固: 关闭 {f['resource']} 公开访问",
+                "assigned_to": "devops"
+            })
+    return state
+
+# ----- 需求拆解子图 -----
+def requirement_prd_receiver(state: GlobalState) -> GlobalState:
+    # 实际中从消息队列或上传接口获取，这里模拟一份PRD
+    state["prd_raw"] = "我们需要支持微信和支付宝两种支付方式，界面简洁，并确保交易安全。"
+    return state
+
+def requirement_multi_perspective_parser(state: GlobalState) -> GlobalState:
+    print("[Requirement Agent] 多视角并行拆解...")
+    # 模拟三个子Agent并行分析 (实际可用asyncio)
+    backend_view = LLMService.invoke("作为后端架构师，将PRD拆解为后端任务列表")
+    frontend_view = LLMService.invoke("作为前端架构师，将PRD拆解为前端任务列表")
+    test_view = LLMService.invoke("作为QA，列出需要测试的用例和自动化点")
+    
+    # 协调Agent合并
+    merged = json.loads(backend_view) if isinstance(backend_view, str) else backend_view
+    state["requirements_wbs"] = merged.get("tasks", [])
+    # 检测模糊点
+    ambiguities = merged.get("ambiguities", [])
+    for amb in ambiguities:
+        detail = demand_deep_ambiguity_clarification(amb, state["prd_raw"])
+        state["risk_notes"].append(f"模糊点澄清: {detail}")
+    return state
+
+def requirement_schedule_estimator(state: GlobalState) -> GlobalState:
+    print("[Requirement Agent] 注入风险缓冲并生成排期...")
+    capacity = MockJiraAPI.get_team_capacity()
+    plan = {}
+    for task in state["requirements_wbs"]:
+        # 根据历史bug率增加缓冲
+        hist = MockJiraAPI.get_issue_history(task.get("module","")) 
+        buffer = 1.2 if hist["bug_rate"] > 0.05 else 1.0
+        plan[task["id"]] = task["estimate"] * buffer
+    state["schedule_plan"] = plan
+    return state
+
+def requirement_task_dispatcher(state: GlobalState) -> GlobalState:
+    print("[Requirement Agent] 对接Jira创建Ticket...")
+    # 模拟创建Jira Issue
+    for task in state["requirements_wbs"]:
+        print(f"创建任务: {task['title']}, 预估{state['schedule_plan'].get(task['id'])}天")
+    return state
+
+# ----- 竞品监控子图 -----
+def competitor_listener(state: GlobalState) -> GlobalState:
+    print("[Competitor Agent] 轮询竞品动态...")
+    fresh = MockCompetitorAPI.fetch_rivals_info()
+    state["competitor_events"] = fresh
+    return state
+
+def competitor_anomaly_detector(state: GlobalState) -> GlobalState:
+    # 与基线对比，识别异常变动
+    for event in state["competitor_events"]:
+        if "降价" in event.get("latest_news",""):
+            event["alert"] = "price_drop"
+            state["competitor_events"].append(event)
+    return state
+
+def competitor_deep_strategist(state: GlobalState) -> GlobalState:
+    print("[Competitor Agent] 深度推理对手战略意图...")
+    for event in state["competitor_events"]:
+        if event.get("alert") == "price_drop":
+            added_context = MockCompetitorAPI.fetch_social_sentiment(event["name"])
+            insight = competitor_strategy_reasoning(event, {"our_roadmap": ["Q4上线AI助手"]})
+            state["competitor_insights"] = insight
+            state["strategic_options"] = insight.get("strategic_moves", [])
+            # 跨域联动：若策略建议新增功能，则通知需求域
+            if "加速AI功能上线" in state["strategic_options"]:
+                state["cross_domain_actions"].append({
+                    "action": "create_requirement_story",
+                    "source": "competitor",
+                    "detail": "竞品降价+性能差评，建议提前AI助手功能",
+                    "priority": "P0"
+                })
+    return state
+
+def competitor_feedback_loop(state: GlobalState) -> GlobalState:
+    print("[Competitor Agent] 策略效果回测...")
+    # 实际中会监测执行后我方数据变化，这里模拟
+    return state
+
+# ============================
+# 元调度 Agent (跨域路由与协同)
+# ============================
+def meta_orchestrator(state: GlobalState) -> GlobalState:
+    """统一调度入口，根据触发源决定执行路径"""
+    print(f"[Meta Agent] 接收任务类型: {state['task_type']}")
+    
+    if state["task_type"] == TaskType.COMPLIANCE:
+        # 合规审计全流程
+        state = compliance_data_collector(state)
+        state = compliance_rule_scanner(state)
+        state = compliance_deep_reasoner(state)
+        state = compliance_evaluator_and_reporter(state)
+        state = compliance_auto_remediator(state)
+    
+    elif state["task_type"] == TaskType.REQUIREMENT:
+        state = requirement_prd_receiver(state)
+        state = requirement_multi_perspective_parser(state)
+        state = requirement_schedule_estimator(state)
+        state = requirement_task_dispatcher(state)
+    
+    elif state["task_type"] == TaskType.COMPETITOR:
+        state = competitor_listener(state)
+        state = competitor_anomaly_detector(state)
+        state = competitor_deep_strategist(state)
+        state = competitor_feedback_loop(state)
+    
+    # 跨域协同动作处理
+    if state["cross_domain_actions"]:
+        print(f"[Meta Agent] 发现跨域动作: {state['cross_domain_actions']}")
+        for action in state["cross_domain_actions"]:
+            if "create_security_task" in action["action"]:
+                print(f" --> 在需求待办中插入安全加固任务: {action['detail']}")
+            elif "create_requirement_story" in action["action"]:
+                print(f" --> 竞品驱动的需求已加入产品待办: {action['detail']}")
+    return state
+
+# ============================
+# 构建 LangGraph 图
+# ============================
+def build_syncomind_graph():
+    workflow = StateGraph(GlobalState)
+    
+    # 所有具体逻辑都集成在元调度节点中 (也可拆分成子图)
+    workflow.add_node("meta", meta_orchestrator)
+    
+    # 入口直接到元调度
+    workflow.set_entry_point("meta")
+    workflow.add_edge("meta", END)
+    
+    return workflow.compile()
+
+# ============================
+# 运行示例
+# ============================
+if __name__ == "__main__":
+    app = build_syncomind_graph()
+    
+    # 场景1: 合规审计
+    print("\n" + "="*50)
+    print("启动合规审计任务")
+    init_state: GlobalState = {
+        "task_type": TaskType.COMPLIANCE,
+        "trigger_source": "每周定时扫描",
+        "knowledge_graph": {},
+        "event_stream": [],
+        "compliance_findings": [],
+        "compliance_report": "",
+        "compliance_score": 0.0,
+        "prd_raw": "",
+        "requirements_wbs": [],
+        "schedule_plan": {},
+        "risk_notes": [],
+        "competitor_events": [],
+        "competitor_insights": {},
+        "strategic_options": [],
+        "cross_domain_actions": [],
+        "current_stage": "",
+        "error_message": ""
+    }
+    result = app.invoke(init_state)
+    print(f"合规评分: {result['compliance_score']}")
+    print(f"跨域动作: {result['cross_domain_actions']}")
+    
+    # 场景2: 竞品监控 (会触发跨域需求)
+    print("\n" + "="*50)
+    print("启动竞品监控任务")
+    init_state["task_type"] = TaskType.COMPETITOR
+    init_state["cross_domain_actions"] = []  # 重置
+    result = app.invoke(init_state)
+    print(f"策略选项: {result['strategic_options']}")
+    print(f"跨域动作: {result['cross_domain_actions']}")
